@@ -75,10 +75,35 @@ Le Swagger liste aussi `apiVersion` comme paramètre de chemin, mais il n'appara
 | `Personne/Get`, `Personne/GetPersonnePhysique`, `Personne/GetPersonneMorale` | Coordonnées |
 | `Utilisateur/ListIntervenant` | Intervenants : nom, prénom, email, login, profil |
 
+### Particularités constatées (13/10/2026)
+
+- **`Document/GetListeDocument` attend son filtre en corps JSON, bien que ce soit un GET** : `GET ...?range=0-9` avec le corps `{"DossierId": 6688}` et `Content-Type: application/json`. Les paramètres de requête `filtreDocument.*` indiqués par le Swagger sont ignorés et renvoient 400 `"Le filtre de recherche n'est pas renseigné !"`. Attention : beaucoup de clients HTTP n'envoient pas de corps sur un GET ; Guzzle le permet via l'option `json`.
+- `Dossier/Get` en GET a le même problème. Utiliser `POST Dossier/GetDossiers?range=0-4` avec un corps `FiltreDossierApiDto` (ex. `DateModificationDateDebut`/`Fin`) : 200, ~1,5 s.
+- `range` au format `début-fin` (ex. `0-9`), 50 éléments maximum.
+- `GetContentDocument` répond toujours en `application/octet-stream` : déterminer le type à partir de `Extension` (via `GetInfosDocument`) ou des octets du fichier.
+
+### Récupération du contenu d'un document : validée (13/10/2026)
+
+Chaîne testée sur un `.docx` réel de 26 746 octets (production, dossier non confidentiel) :
+
+| Étape | Résultat |
+|---|---|
+| `POST Dossier/GetDossiers` | 200, identifiants de dossiers |
+| `GET Document/GetListeDocument` (corps `{"DossierId":…}`) | 200, 7 documents (`.docx`, `.msg`), avec `DocumentId`, `Extension`, `FileSize`, `RepertoireId` |
+| `GET Document/GetInfosDocument?documentId=` | 200, mêmes champs que la liste |
+| `GET Document/GetContentDocument?withConvertPdf=false` | 200, 0,9 s, **fichier Word d'origine complet** (taille identique à `FileSize`) |
+| `GET Document/GetContentDocument?withConvertPdf=true` | 200, 1,0 s, **PDF 1.7 A4 de 4 pages** (88 659 octets, converti par Aspose.Words côté SECIB) |
+| Extraction de texte | `.docx` : 491 mots ; PDF (`pdftotext`) : 537 mots ; **similarité des deux textes 99,2 %** |
+
+Conclusions :
+- On peut récupérer l'intégralité d'un document et en extraire le texte.
+- La conversion Word → PDF de SECIB produit un PDF avec une **vraie couche texte** (pas une image) : `pdftotext` suffit, pas besoin d'OCR pour les documents Word.
+- Restent à tester : les `.msg` (e-mails Outlook, type `E`, très fréquents dans les dossiers), les PDF scannés (OCR) et `GetContentDocumentBase64`.
+
 ### Limites confirmées par Septeo
 
 - `GetContentDocument` renvoie le **fichier** (PDF si conversion demandée), **pas de texte extrait**. Il faut donc une étape d'extraction de texte (parsing PDF, OCR si scan) côté plateforme. Ne pas passer par une duplication vers SharePoint : on l'écarte volontairement.
-- À valider par un test : la conversion d'un document Word natif en PDF exploitable via `withConvertPdf=true`.
+- ~~À valider par un test : la conversion d'un document Word natif en PDF exploitable via `withConvertPdf=true`.~~ Validé (voir ci-dessus).
 - Pas de webhook documenté : pour détecter de nouvelles pièces, il faudrait du polling.
 - Écriture non activée dans l'usage courant et non souhaitée en Phase 1.
 
@@ -155,5 +180,5 @@ Pour chaque tentative : URL appelée (sans le token), code HTTP, début du corps
 ## 7. Prochaine étape de développement
 
 1. ~~Rendre le client SECIB fonctionnel sur `GetInfoCabinet`~~ (OK en script). Le porter en Laravel, avec configuration par variables d'environnement : `SECIB_BASE_URL`, `SECIB_TOKEN_URL`, `SECIB_CABINET_ID`, `SECIB_CLIENT_ID`, `SECIB_CLIENT_SECRET`, et un token en cache (8 h).
-2. Enchaîner sur `GetDossierById`, `GetListRepertoireDossier`, `GetInfosDocument`, puis `GetContentDocument` (test Word → PDF).
+2. ~~Enchaîner sur `GetListRepertoireDossier`, `GetInfosDocument`, puis `GetContentDocument` (test Word → PDF).~~ Validé. Reste : `.msg`, PDF scannés, et le portage dans le client Laravel.
 3. Encapsuler le client derrière une interface avec un mock, pour développer sans toucher à la production tant que le sandbox n'existe pas.
