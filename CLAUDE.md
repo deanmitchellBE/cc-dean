@@ -50,12 +50,14 @@ Le Swagger liste aussi `apiVersion` comme paramètre de chemin, mais il n'appara
 ### Authentification
 
 - Header : `Authorization: Bearer <access_token>` (description Swagger : « Bearer access_Token »). Aucun `securityDefinitions` dans le Swagger.
-- **Un endpoint OAuth2 existe : `https://secibneo.secib.fr/8.6.0/token`** (serveur ASP.NET / OWIN). Réponses observées sans identifiants :
-  - GET → 400 `{"error":"unsupported_grant_type"}`
-  - POST `grant_type=client_credentials` → 400 `{"error":"unauthorized_client"}` (le grant est reconnu, il manque les identifiants client)
-  - Conclusion probable : la clé fournie est un identifiant à échanger contre un access token via `POST /token`, pas le Bearer lui-même. Le format exact (client_id/client_secret, Basic auth ou corps du formulaire) reste à confirmer par Septeo ou par test.
+- **Obtention du token (validé le 13/10/2026)** : OAuth2 `client_credentials`.
+  - `POST https://api.secib.fr/forward/<SECIB_CABINET_ID>/ApiToken`, corps `application/x-www-form-urlencoded` : `client_id`, `client_secret`, `grant_type=client_credentials`.
+  - **Le GUID du cabinet s'écrit sans accolades** dans l'URL. Avec accolades (forme donnée par Septeo `{guid}`) → 400 `unauthorized_client`. En Basic auth → 500.
+  - Réponse : `access_token` (~430 caractères), `token_type`, `expires_in: 28799` → **token valable 8 h**. Le mettre en cache côté backend et le renouveler avant expiration.
+  - `client_secret` a la forme `<nombre>.<base64>.<base64>` (c'est la « clé » reçue). Le `cabinetId` est un GUID, distinct du premier segment de la clé.
+  - `https://secibneo.secib.fr/8.6.0/token` existe aussi mais refuse ces identifiants (`unauthorized_client`) : ne pas l'utiliser.
 - **Un seul token pour tout le cabinet.** Aucune segmentation par avocat côté API : les rôles des intervenants (avocat associé, avocat, stagiaire, secrétaire) sont visibles dans les données, mais leur application est entièrement à notre charge.
-- Durée de vie du token : **inconnue**, Septeo doit confirmer. Prévoir une gestion propre des 401 (message clair, pas de retry en boucle).
+- Durée de vie du token : 8 h (`expires_in: 28799`). Prévoir une gestion propre des 401 (un seul renouvellement du token, puis message clair, pas de retry en boucle).
 
 ### Endpoints utiles pour la Phase 1 (tous GET)
 
@@ -94,8 +96,14 @@ Le Swagger liste aussi `apiVersion` comme paramètre de chemin, mais il n'appara
 | POST `/8.6.0/token` `grant_type=client_credentials` | 400 `unauthorized_client` |
 | GET `/8.6.0/0/api/v1/Cabinet/GetInfoCabinet` (cabinetId factice, avec ou sans Bearer) | 404, corps vide, ~0,5 s |
 
-Points ouverts : la valeur réelle de `cabinetId`, et si la clé est un Bearer direct ou un identifiant à échanger sur `/token`.
 Un 404 avec un `cabinetId` invalide signifie qu'un 404 ne prouve **pas** une mauvaise URL : il peut aussi venir d'un mauvais `cabinetId`.
+
+**Test avec identifiants (13/10/2026) : connexion OK.**
+
+| Appel | Résultat |
+|---|---|
+| POST `api.secib.fr/forward/<guid>/ApiToken` (sans accolades) | 200, token valable 8 h |
+| GET `/8.6.0/<guid>/api/v1/Cabinet/GetInfoCabinet` | **200, ~0,5 s**, renvoie le nom du cabinet, `VersionCabinet: 8.6.0`, `Localisation: BE` |
 
 ### 5.1 URL de base
 
@@ -103,19 +111,19 @@ Confirmée (voir 5.0) : `https://secibneo.secib.fr/8.6.0/$SECIB_CABINET_ID/api/v
 
 Test (un seul appel, token jamais affiché) :
 
+Le script lit `SECIB_CABINET_ID`, `SECIB_CLIENT_ID` et `SECIB_CLIENT_SECRET` dans l'environnement, obtient le token, puis appelle `GetInfoCabinet` :
+
 ```bash
-SECIB_API_TOKEN=... SECIB_CABINET_ID=... ./scripts/secib_check.sh
+./scripts/secib_check.sh
 ```
 
 ### 5.2 Cabinet ID
 
-La clé fournie commence par un segment numérique suivi de deux segments base64 séparés par des points. **Hypothèse non confirmée** : le premier segment pourrait être le `cabinetId`. À vérifier, ne pas le tenir pour acquis.
+Résolu : c'est le GUID présent dans l'URL de token fournie par Septeo (sans accolades). Ce n'est pas le premier segment de la clé.
 
 ### 5.3 Format du token
 
-La clé ne ressemble pas à un JWT standard. Deux cas possibles :
-- c'est directement le Bearer token → tester tel quel avec `scripts/secib_check.sh` ;
-- c'est un identifiant à échanger contre un access token → l'endpoint `POST /8.6.0/token` existe (voir §4) ; il reste à connaître les paramètres attendus (demander à Septeo).
+Résolu : la clé est le `client_secret`, à échanger contre un access token (voir §4, Authentification).
 
 ### 5.4 Interpréter les réponses
 
@@ -136,8 +144,8 @@ Pour chaque tentative : URL appelée (sans le token), code HTTP, début du corps
 
 ## 6. Questions encore ouvertes (à poser à Septeo)
 
-1. Durée de vie du token et procédure de renouvellement.
-2. Mécanisme exact d'obtention du token : paramètres attendus par `POST /8.6.0/token` (grant_type, client_id/secret, format), et rôle du premier segment de la clé.
+1. ~~Durée de vie du token~~ (8 h, constaté) ; nombre de tokens simultanés autorisés ?
+2. ~~Mécanisme d'obtention du token~~ (résolu, voir §4).
 3. Liste d'IP autorisées (allowlisting) ?
 4. Date de mise à disposition du sandbox.
 5. Juridiction et échéances : exposées par l'API (fiche dossier ou module agenda) ?
@@ -146,6 +154,6 @@ Pour chaque tentative : URL appelée (sans le token), code HTTP, début du corps
 
 ## 7. Prochaine étape de développement
 
-1. Rendre le client SECIB fonctionnel sur `GetInfoCabinet` (§5), avec configuration par variables d'environnement : `SECIB_BASE_URL`, `SECIB_CABINET_ID`, `SECIB_API_TOKEN`.
+1. ~~Rendre le client SECIB fonctionnel sur `GetInfoCabinet`~~ (OK en script). Le porter en Laravel, avec configuration par variables d'environnement : `SECIB_BASE_URL`, `SECIB_TOKEN_URL`, `SECIB_CABINET_ID`, `SECIB_CLIENT_ID`, `SECIB_CLIENT_SECRET`, et un token en cache (8 h).
 2. Enchaîner sur `GetDossierById`, `GetListRepertoireDossier`, `GetInfosDocument`, puis `GetContentDocument` (test Word → PDF).
 3. Encapsuler le client derrière une interface avec un mock, pour développer sans toucher à la production tant que le sandbox n'existe pas.
